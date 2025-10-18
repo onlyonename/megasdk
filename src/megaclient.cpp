@@ -18425,6 +18425,33 @@ bool MegaClient::startxfer(direction_t d, File* f, TransferDbCommitter& committe
                 return false;
             }
 
+            if (!f->syncxfer && f->targetuser != SUPPORT_USER_HANDLE)
+            {
+                if (auto matchingNode = findNodeByFingerprintAndVerifyMAC(*f, f->getLocalname()))
+                {
+                    LOG_info << "Found matching node with verified MAC, cloning instead of uploading: " 
+                             << f->name;
+
+                    f->sendPutnodesToCloneNode(this, matchingNode.get(), PUTNODES_APP, NodeHandle(), 
+                        [this, f, tag](const Error& e, targettype_t, vector<NewNode>&, 
+                                       bool, int, const std::map<std::string, std::string>&)
+                        {
+                            if (e)
+                            {
+                                LOG_err << "Failed to clone node: " << e;
+                            }
+                            else
+                            {
+                                LOG_info << "Successfully cloned node instead of uploading";
+                            }
+                            app->putnodes_result(e, PUTNODES_APP, {}, false, tag, {});
+                        },
+                        false);
+                    
+                    return true;
+                }
+            }
+
 #ifdef USE_MEDIAINFO
             mediaFileInfo.requestCodecMappingsOneTime(this, f->getLocalname());
 #endif
@@ -18836,6 +18863,59 @@ std::shared_ptr<Node> MegaClient::nodebyfingerprint(LocalNode* localNode)
     return *remoteNode;
 }
 #endif /* ENABLE_SYNC */
+
+std::shared_ptr<Node> MegaClient::findNodeByFingerprintAndVerifyMAC(const FileFingerprint& localFingerprint,
+                                                                     const LocalPath& localPath)
+{
+    sharedNode_vector remoteNodes = mNodeManager.getNodesByFingerprint(localFingerprint);
+
+    if (remoteNodes.empty())
+        return nullptr;
+
+    auto ifAccess = fsaccess->newfileaccess();
+
+    if (!ifAccess->fopen(localPath, true, false, FSLogging::logOnError))
+        return nullptr;
+
+    for (const auto& remoteNode : remoteNodes)
+    {
+        if (!remoteNode || remoteNode->type != FILENODE)
+            continue;
+
+        if (remoteNode->hasZeroKey())
+        {
+            LOG_warn << "Skipping node with zero key during MAC verification: " << remoteNode->displaypath();
+            continue;
+        }
+
+        std::string remoteKey = remoteNode->nodekey();
+        if (remoteKey.size() < SymmCipher::KEYLENGTH + sizeof(int64_t) + sizeof(int64_t))
+        {
+            LOG_warn << "Invalid node key size for MAC verification";
+            continue;
+        }
+
+        const char *iva = &remoteKey[SymmCipher::KEYLENGTH];
+
+        SymmCipher cipher;
+        cipher.setkey((byte*)&remoteKey[0], remoteNode->type);
+
+        int64_t remoteIv = MemAccess::get<int64_t>(iva);
+        int64_t remoteMac = MemAccess::get<int64_t>(iva + sizeof(int64_t));
+
+        ifAccess->frawread(nullptr, 0, 0, false, FSLogging::logExceptFileNotFound);
+
+        auto result = generateMetaMac(cipher, *ifAccess, remoteIv);
+        if (result.first && result.second == remoteMac)
+        {
+            LOG_info << "MAC verification succeeded, can clone node instead of uploading: " 
+                     << remoteNode->displaypath();
+            return remoteNode;
+        }
+    }
+
+    return nullptr;
+}
 
 static bool nodes_ctime_greater(const Node* a, const Node* b)
 {

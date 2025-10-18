@@ -2363,6 +2363,9 @@ public:
                                 const std::string& filenameExtensionLowercaseNoDot1,
                                 const FileFingerprint& fp2,
                                 const std::string& filenameExtensionLowercaseNoDot2) const;
+    std::shared_ptr<Node> findNodeByFingerprintAndVerifyMAC(const FileFingerprint& localFingerprint,
+                                                             const LocalPath& localPath);
+
 
 #ifdef ENABLE_SYNC
 
